@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# Local env
+.env
+
+# Tooling/editor
+.idea/
+.DS_Store
+
+# Runtime artifacts
+traces/
+memory.md
+*.log
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
