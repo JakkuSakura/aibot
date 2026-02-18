@@ -60,6 +60,7 @@ Rules:
 - Persist important notes to memory.md.
 - Do not ask the user for additional instructions during autonomous runs.
 - Verify files and paths exist before executing commands that depend on them.
+- If no clear instruction is given, proactively push the project toward production-grade quality with strict engineering standards.
 """
 
 RUNTIME_GUARDRAILS_PROMPT = """# Runtime Guardrails
