@@ -53,13 +53,17 @@ Capabilities:
   ==========BELOW ARE COMMAND==========
   <shell command(s)>
   ==========ABOVE ARE COMMAND==========
+- Use meta command `restart` (single line, outside command blocks) when runtime-affecting changes should be reloaded.
 
 Rules:
 - Keep actions scoped to the current project.
 - Prefer safe, reversible edits.
-- Persist important notes to memory.md.
+- You may modify the aibot harness and project automation files freely when needed.
+- Read additional capabilities from `skills/` and you may create/update skills under `skills/` when learning reusable patterns.
+- Persist important notes to memory.md (managed by aibot itself).
 - Do not ask the user for additional instructions during autonomous runs.
 - Verify files and paths exist before executing commands that depend on them.
+- Treat normal input as either a concrete request or a ping to continue progress; do not reduce to health-check chatter.
 - If no clear instruction is given, proactively push the project toward production-grade quality with strict engineering standards.
 """
 
@@ -70,8 +74,22 @@ RUNTIME_GUARDRAILS_PROMPT = """# Runtime Guardrails
 - Do not assume helper scripts exist unless confirmed by filesystem checks.
 - Keep actions scoped to the active project directory.
 - For heredocs, always use quoted delimiters: <<'EOF' (never unquoted << EOF).
-- Emit commands only with the explicit command block markers.
+- Emit commands only between the exact marker pair with matching `=` counts:
+  - begin: ==========BELOW ARE COMMAND==========
+  - end:   ==========ABOVE ARE COMMAND==========
 """
+
+DEFAULT_NO_COMMAND_PROMPT = (
+    "No command block was detected. Continue by returning one or more commands using:\n"
+    "==========BELOW ARE COMMAND==========\n"
+    "<command>\n"
+    "==========ABOVE ARE COMMAND=========="
+)
+
+DEFAULT_PING_PROMPT = (
+    "Ping: continue autonomous progress in this project. Do not ask questions. "
+    "Choose the next concrete action and execute it if needed."
+)
 
 DEFAULT_CONFIG_TOML = """[openrouter]
 model = \"x-ai/grok-3\"
@@ -79,16 +97,11 @@ base_url = \"https://openrouter.ai/api/v1\"
 api_key_env = \"OPENROUTER_API_KEY\"
 context_window_tokens = 0
 
-[prompt]
-system_file = \"Prompts.md\"
-
 [agent]
 max_steps = 0
 loop_sleep_seconds = 1.0
 max_context_messages = 20
 max_message_chars = 4000
-no_command_prompt = \"No command block was detected. Continue by returning one or more commands using:\n==========BELOW ARE COMMAND==========\n<command>\n==========ABOVE ARE COMMAND==========\"
-ping_prompt = \"Ping: continue autonomous progress in this project. Do not ask questions. Choose the next concrete action and execute it if needed.\"
 
 [execution]
 shell = \"/bin/bash\"
@@ -111,18 +124,11 @@ class OpenRouterConfig:
 
 
 @dataclass(slots=True)
-class PromptConfig:
-    system_file: str
-
-
-@dataclass(slots=True)
 class AgentConfig:
     max_steps: int
     loop_sleep_seconds: float
     max_context_messages: int
     max_message_chars: int
-    no_command_prompt: str
-    ping_prompt: str
 
 
 @dataclass(slots=True)
@@ -135,7 +141,6 @@ class ExecutionConfig:
 @dataclass(slots=True)
 class AppConfig:
     openrouter: OpenRouterConfig
-    prompt: PromptConfig
     agent: AgentConfig
     execution: ExecutionConfig
 
@@ -222,8 +227,17 @@ def load_config(path: Path) -> AppConfig:
     with path.open("rb") as handle:
         raw: dict[str, Any] = tomllib.load(handle)
 
+    return build_config(raw)
+
+
+def load_default_config() -> AppConfig:
+    raw = tomllib.loads(DEFAULT_CONFIG_TOML)
+    return build_config(raw)
+
+
+def build_config(raw: dict[str, Any]) -> AppConfig:
+
     openrouter_raw = raw.get("openrouter", {})
-    prompt_raw = raw.get("prompt", {})
     agent_raw = raw.get("agent", {})
     execution_raw = raw.get("execution", {})
 
@@ -234,26 +248,11 @@ def load_config(path: Path) -> AppConfig:
             api_key_env=str(openrouter_raw.get("api_key_env", "OPENROUTER_API_KEY")),
             context_window_tokens=int(openrouter_raw.get("context_window_tokens", 0)),
         ),
-        prompt=PromptConfig(
-            system_file=str(prompt_raw.get("system_file", "Prompts.md")),
-        ),
         agent=AgentConfig(
             max_steps=int(agent_raw.get("max_steps", 0)),
             loop_sleep_seconds=float(agent_raw.get("loop_sleep_seconds", 1.0)),
             max_context_messages=int(agent_raw.get("max_context_messages", 20)),
             max_message_chars=int(agent_raw.get("max_message_chars", 4000)),
-            no_command_prompt=str(
-                agent_raw.get(
-                    "no_command_prompt",
-                    "No command block was detected. Continue by returning one or more commands using:\n==========BELOW ARE COMMAND==========\n<command>\n==========ABOVE ARE COMMAND==========",
-                )
-            ),
-            ping_prompt=str(
-                agent_raw.get(
-                    "ping_prompt",
-                    "Ping: continue autonomous progress in this project. Do not ask questions. Choose the next concrete action and execute it if needed.",
-                )
-            ),
         ),
         execution=ExecutionConfig(
             shell=str(execution_raw.get("shell", "/bin/bash")),
@@ -269,6 +268,18 @@ def read_text_file(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def resolve_tool_root_dir() -> Path:
+    env_override = os.environ.get("AIBOT_TOOL_ROOT_DIR")
+    if env_override:
+        return Path(env_override).expanduser().resolve()
+
+    module_dir = Path(__file__).resolve().parent
+    for candidate in [module_dir, module_dir.parent, module_dir.parent.parent]:
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    return module_dir.parent
+
+
 def resolve_tool_skills_dir() -> Path | None:
     env_override = os.environ.get("AIBOT_TOOL_SKILLS_DIR")
     if env_override:
@@ -276,12 +287,8 @@ def resolve_tool_skills_dir() -> Path | None:
         if candidate.exists() and candidate.is_dir():
             return candidate
 
-    module_dir = Path(__file__).resolve().parent
-    candidates = [
-        module_dir / "skills",
-        module_dir.parent / "skills",
-        module_dir.parent.parent / "skills",
-    ]
+    tool_root = resolve_tool_root_dir()
+    candidates = [tool_root / "skills"]
     for candidate in candidates:
         if candidate.exists() and candidate.is_dir():
             return candidate
@@ -289,13 +296,15 @@ def resolve_tool_skills_dir() -> Path | None:
 
 
 def load_skills_context(project_dir: Path) -> tuple[str, list[str]]:
-    skill_roots = [project_dir / "skills"]
+    skill_roots = [
+        project_dir / "skills",
+        Path.home() / ".codex" / "skills",
+        Path.home() / ".config" / "aibot" / "skills",
+    ]
 
     tool_skills_dir = resolve_tool_skills_dir()
     if tool_skills_dir is not None:
         skill_roots.append(tool_skills_dir)
-
-    skill_roots.append(Path.home() / ".codex" / "skills")
 
     seen_roots: set[str] = set()
     deduped_roots: list[Path] = []
@@ -447,6 +456,26 @@ def extract_commands(content: str) -> list[str]:
     return commands
 
 
+def has_restart_meta_command(content: str) -> bool:
+    in_block = False
+
+    for raw_line in content.splitlines():
+        marker = raw_line.strip()
+
+        if not in_block and marker == COMMAND_BLOCK_BEGIN:
+            in_block = True
+            continue
+
+        if in_block and marker == COMMAND_BLOCK_END:
+            in_block = False
+            continue
+
+        if not in_block and marker.lower() == "restart":
+            return True
+
+    return False
+
+
 def has_unquoted_heredoc(command: str) -> bool:
     index = 0
     length = len(command)
@@ -549,22 +578,35 @@ def resolve_project_dir(project_dir_arg: str) -> Path:
     return Path(project_dir_arg).expanduser().resolve()
 
 
-def resolve_config_path(project_dir: Path, config_arg: str | None) -> Path:
+def resolve_config_path(project_dir: Path, config_arg: str | None) -> tuple[Path | None, str]:
     if config_arg:
         candidate = Path(config_arg).expanduser()
         if candidate.is_absolute():
-            return candidate
-        return project_dir / candidate
+            return candidate, "explicit"
+        return project_dir / candidate, "explicit"
 
     local_config = project_dir / "config.toml"
     if local_config.exists():
-        return local_config
+        return local_config, "project"
 
     home_config = Path.home() / ".config" / "aibot" / "config.toml"
     if home_config.exists():
-        return home_config
+        return home_config, "home"
 
-    return local_config
+    tool_config = resolve_tool_root_dir() / "config.toml"
+    if tool_config.exists():
+        return tool_config, "tool"
+
+    return None, "default"
+
+
+def ensure_runtime_scaffold(project_dir: Path) -> None:
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "skills").mkdir(exist_ok=True)
+    if not (project_dir / "skills" / ".gitkeep").exists():
+        (project_dir / "skills" / ".gitkeep").write_text("", encoding="utf-8")
+    if not (project_dir / "memory.md").exists():
+        (project_dir / "memory.md").write_text("", encoding="utf-8")
 
 
 def write_if_missing(path: Path, content: str, force: bool) -> None:
@@ -584,7 +626,13 @@ def init_project(project_dir: Path, force: bool) -> int:
     return 0
 
 
-def run_agent(project_dir: Path, config_path: Path, initial_prompt_arg: str | None) -> int:
+def run_agent(
+    project_dir: Path,
+    config_path: Path | None,
+    config_source: str,
+    initial_prompt_arg: str | None,
+) -> int:
+    ensure_runtime_scaffold(project_dir)
     os.chdir(project_dir)
     load_dotenv(project_dir / ".env")
 
@@ -595,41 +643,36 @@ def run_agent(project_dir: Path, config_path: Path, initial_prompt_arg: str | No
         {
             "type": "run_started",
             "project_dir": str(project_dir),
-            "config_path": str(config_path),
+            "config_source": config_source,
+            "config_path": str(config_path) if config_path is not None else "",
         },
     )
 
-    try:
+    if config_path is None:
+        config = load_default_config()
+        config_snapshot_text = DEFAULT_CONFIG_TOML
+    elif config_path.exists():
         config = load_config(config_path)
-    except FileNotFoundError as exc:
-        append_trace_event(trace_dir, {"type": "startup_error", "error": str(exc)})
-        print(str(exc), file=sys.stderr)
-        print(
-            "Tip: create `config.toml` in the current project directory, or `~/.config/aibot/config.toml`.",
-            file=sys.stderr,
-        )
-        return 1
-
-    prompt_path = project_dir / config.prompt.system_file
-    if prompt_path.exists():
-        base_system_prompt = read_text_file(prompt_path)
+        config_snapshot_text = config_path.read_text(encoding="utf-8")
     else:
-        base_system_prompt = DEFAULT_PROMPTS_MD
         append_trace_event(
             trace_dir,
             {
-                "type": "prompt_fallback",
-                "missing_prompt_path": str(prompt_path),
-                "fallback": "DEFAULT_PROMPTS_MD",
+                "type": "startup_error",
+                "error": f"Config file not found: {config_path}",
             },
         )
+        print(f"Config file not found: {config_path}", file=sys.stderr)
+        return 1
+
+    base_system_prompt = DEFAULT_PROMPTS_MD
 
     skills_context, skill_paths = load_skills_context(project_dir)
     if skills_context:
         system_prompt = (
             f"{base_system_prompt}\n\n"
             "# Skills Context\n"
-            "Loaded from project and user skill directories.\n\n"
+            "Loaded from project, home config, and tool source skill directories.\n\n"
             f"{skills_context}"
         )
     else:
@@ -646,7 +689,7 @@ def run_agent(project_dir: Path, config_path: Path, initial_prompt_arg: str | No
 
     write_trace_text(trace_dir, "skills_paths.txt", "\n".join(skill_paths) if skill_paths else "")
     write_trace_text(trace_dir, "system_prompt.md", system_prompt)
-    write_trace_text(trace_dir, "config_snapshot.toml", config_path.read_text(encoding="utf-8"))
+    write_trace_text(trace_dir, "config_snapshot.toml", config_snapshot_text)
 
     api_key = resolve_openrouter_api_key(config.openrouter)
     if not api_key:
@@ -682,7 +725,7 @@ def run_agent(project_dir: Path, config_path: Path, initial_prompt_arg: str | No
         },
     )
 
-    effective_prompt = initial_prompt if initial_prompt else config.agent.ping_prompt
+    effective_prompt = initial_prompt if initial_prompt else DEFAULT_PING_PROMPT
     truncated_prompt = truncate_text(effective_prompt, config.agent.max_message_chars)
     runtime_entries.append(
         {
@@ -783,12 +826,16 @@ def run_agent(project_dir: Path, config_path: Path, initial_prompt_arg: str | No
 
         runtime_entries.append({"role": "assistant", "content": assistant_text})
 
+        if has_restart_meta_command(assistant_text):
+            append_trace_event(trace_dir, {"type": "meta_restart", "step": step})
+            return 85
+
         commands = extract_commands(assistant_text)
         if not commands:
             runtime_entries.append(
                 {
                     "role": "user",
-                    "content": config.agent.no_command_prompt,
+                    "content": DEFAULT_NO_COMMAND_PROMPT,
                 }
             )
             append_trace_event(trace_dir, {"type": "no_command", "step": step})
@@ -839,8 +886,16 @@ def main() -> int:
         return init_project(project_dir, args.force)
 
     project_dir = resolve_project_dir(args.project_dir)
-    config_path = resolve_config_path(project_dir, args.config)
-    return run_agent(project_dir, config_path, args.initial_prompt)
+    config_path, config_source = resolve_config_path(project_dir, args.config)
+
+    initial_prompt = args.initial_prompt
+    while True:
+        exit_code = run_agent(project_dir, config_path, config_source, initial_prompt)
+        if exit_code != 85:
+            return exit_code
+
+        config_path, config_source = resolve_config_path(project_dir, args.config)
+        initial_prompt = None
 
 
 def main_entry() -> None:

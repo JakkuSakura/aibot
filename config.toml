@@ -4,16 +4,11 @@ base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 context_window_tokens = 0
 
-[prompt]
-system_file = "Prompts.md"
-
 [agent]
 max_steps = 0
 loop_sleep_seconds = 1.0
 max_context_messages = 20
 max_message_chars = 4000
-no_command_prompt = "No command block was detected. Continue by returning one or more commands using:\n==========BELOW ARE COMMAND==========\n<command>\n==========ABOVE ARE COMMAND=========="
-ping_prompt = "Ping: continue autonomous progress in this project. Do not ask questions. Choose the next concrete action and execute it if needed."
 
 [execution]
 shell = "/bin/bash"
