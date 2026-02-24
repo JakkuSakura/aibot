@@ -23,3 +23,41 @@ memory.md
 dist/
 build/
 *.egg-info/
+
+# Local workspace artifacts (non-source project scratch/output)
+analysis.html
+dash_app_outline.md
+ema_implementation_plan.md
+financial_analysis_aapl.html
+financial_analysis_test.html
+financial_analyzer_report.md
+potential_indicators.md
+report_draft.md
+yfinance_info.html
+temp_indicators.txt
+temp_memory_update.txt
+test_data.csv
+tickers.txt
+
+# Local workspace directories
+data/
+output/
+projects/
+proposals/
+
+# Local scratch sources (not part of aibot package)
+src/README.md
+src/alpha_vantage_fetch.py
+src/ema_calculator.py
+src/ema_integration_plan.md
+src/financial_data_analyzer.py
+src/requirements.txt
+src/rsi_calculator.py
+src/run_analyzer.sh
+src/test_analyzer.py
+src/test_rsi_calculation.py
+
+# Keep actual aibot package sources and templates tracked
+!src/aibot/
+!src/aibot/**
+src/aibot/__pycache__/

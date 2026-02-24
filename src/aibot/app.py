@@ -40,44 +40,13 @@ MODEL_CONTEXT_WINDOW_PREFIXES: list[tuple[str, int]] = [
     ("anthropic/claude-", 200000),
 ]
 
-DEFAULT_PROMPTS_MD = """You are a project automation assistant called aibot.
-
-Goal:
-- Operate inside the current project directory.
-- Execute actionable steps to move work forward.
-- Use command blocks when terminal actions are needed.
-
-Capabilities:
-- Read/write local files.
-- Run shell commands using explicit blocks:
-  ==========BELOW ARE COMMAND==========
-  <shell command(s)>
-  ==========ABOVE ARE COMMAND==========
-- Use meta command `restart` (single line, outside command blocks) when runtime-affecting changes should be reloaded.
-
-Rules:
-- Keep actions scoped to the current project.
-- Prefer safe, reversible edits.
-- You may modify the aibot harness and project automation files freely when needed.
-- Read additional capabilities from `skills/` and you may create/update skills under `skills/` when learning reusable patterns.
-- Persist important notes to memory.md (managed by aibot itself).
-- Do not ask the user for additional instructions during autonomous runs.
-- Verify files and paths exist before executing commands that depend on them.
-- Treat normal input as either a concrete request or a ping to continue progress; do not reduce to health-check chatter.
-- If no clear instruction is given, proactively push the project toward production-grade quality with strict engineering standards.
-"""
-
-RUNTIME_GUARDRAILS_PROMPT = """# Runtime Guardrails
-- Operate autonomously. Do not ask the user questions.
-- If no explicit request is provided, continue progress using a ping workflow.
-- Before using a local script or path, verify it exists in the current project.
-- Do not assume helper scripts exist unless confirmed by filesystem checks.
-- Keep actions scoped to the active project directory.
-- For heredocs, always use quoted delimiters: <<'EOF' (never unquoted << EOF).
-- Emit commands only between the exact marker pair with matching `=` counts:
-  - begin: ==========BELOW ARE COMMAND==========
-  - end:   ==========ABOVE ARE COMMAND==========
-"""
+DEFAULT_SYSTEM_PROMPT_RELATIVE_PATH = Path("templates/prompts/system.md")
+DEFAULT_GUARDRAILS_PROMPT_RELATIVE_PATH = Path("templates/prompts/runtime_guardrails.md")
+DEFAULT_AGENTS_PROFILE = "project_engineer"
+AGENTS_PROFILE_TEMPLATE_MAP: dict[str, Path] = {
+    "project_engineer": Path("templates/agents/project_engineer.AGENTS.md"),
+    "experimental_creature": Path("templates/agents/experimental_creature.AGENTS.md"),
+}
 
 DEFAULT_NO_COMMAND_PROMPT = (
     "No command block was detected. Continue by returning one or more commands using:\n"
@@ -180,6 +149,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite existing aibot files.",
     )
+    init_parser.add_argument(
+        "--agents-profile",
+        choices=sorted(AGENTS_PROFILE_TEMPLATE_MAP.keys()),
+        default=DEFAULT_AGENTS_PROFILE,
+        help="AGENTS.md profile to initialize in project directory.",
+    )
 
     run_parser = subparsers.add_parser("run", help="Run aibot loop in a project directory")
     run_parser.add_argument(
@@ -266,6 +241,21 @@ def read_text_file(path: Path) -> str:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
     return path.read_text(encoding="utf-8")
+
+
+def resolve_template_file(path: Path) -> Path:
+    return resolve_tool_root_dir() / "src" / "aibot" / path
+
+
+def load_system_prompt(project_dir: Path) -> str:
+    project_prompt = project_dir / "Prompts.md"
+    if project_prompt.exists():
+        return read_text_file(project_prompt)
+    return read_text_file(resolve_template_file(DEFAULT_SYSTEM_PROMPT_RELATIVE_PATH))
+
+
+def load_runtime_guardrails_prompt() -> str:
+    return read_text_file(resolve_template_file(DEFAULT_GUARDRAILS_PROMPT_RELATIVE_PATH))
 
 
 def resolve_tool_root_dir() -> Path:
@@ -615,12 +605,20 @@ def write_if_missing(path: Path, content: str, force: bool) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def init_project(project_dir: Path, force: bool) -> int:
+def write_agents_file(project_dir: Path, profile: str, force: bool) -> None:
+    relative_template_path = AGENTS_PROFILE_TEMPLATE_MAP[profile]
+    template_path = resolve_template_file(relative_template_path)
+    template_content = read_text_file(template_path)
+    write_if_missing(project_dir / "AGENTS.md", template_content, force)
+
+
+def init_project(project_dir: Path, force: bool, agents_profile: str) -> int:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "skills").mkdir(exist_ok=True)
 
     write_if_missing(project_dir / "skills" / ".gitkeep", "", force)
     write_if_missing(project_dir / "memory.md", "", force)
+    write_agents_file(project_dir, agents_profile, force)
 
     print(f"Initialized aibot project files in: {project_dir}")
     return 0
@@ -665,7 +663,8 @@ def run_agent(
         print(f"Config file not found: {config_path}", file=sys.stderr)
         return 1
 
-    base_system_prompt = DEFAULT_PROMPTS_MD
+    base_system_prompt = load_system_prompt(project_dir)
+    runtime_guardrails_prompt = load_runtime_guardrails_prompt()
 
     skills_context, skill_paths = load_skills_context(project_dir)
     if skills_context:
@@ -758,7 +757,7 @@ def run_agent(
         )
         messages = build_messages(
             system_prompt,
-            RUNTIME_GUARDRAILS_PROMPT,
+            runtime_guardrails_prompt,
             context_window_info,
             runtime_entries,
             config.agent.max_context_messages,
@@ -883,7 +882,7 @@ def main() -> int:
 
     if args.command == "init":
         project_dir = resolve_project_dir(args.project_dir)
-        return init_project(project_dir, args.force)
+        return init_project(project_dir, args.force, args.agents_profile)
 
     project_dir = resolve_project_dir(args.project_dir)
     config_path, config_source = resolve_config_path(project_dir, args.config)
